@@ -859,7 +859,7 @@ struct macb_queue {
 	dma_addr_t		tx_ring_dma;
 	struct work_struct	tx_error_task;
 
-	struct work_struct	tx_clear_data_task;
+	struct delayed_work	tx_clear_data_task;
 	int please_clear;
 	// Add a memory location to store our DMA address
 	

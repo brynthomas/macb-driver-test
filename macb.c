@@ -566,7 +566,7 @@ static void macb_tx_unmap(struct macb *bp, struct macb_tx_skb *tx_skb)
 	}*/
 }
 
-static void macb_tx_error_task(struct work_struct *work)
+static void macb_tx_error_task(struct work_struct  *work)
 {
 	struct macb_queue	*queue = container_of(work, struct macb_queue,
 						      tx_error_task);
@@ -782,6 +782,98 @@ static void macb_tx_non_interrupt(struct macb_queue *queue)
 		BDEBUG(bp->txirq_short_time += as_nanoseconds(&endTs) - as_nanoseconds(&startTs));	
 	
 }
+
+static void macb_tx_clear_data_task(struct work_struct  *work) {
+	struct macb_queue	*queue = container_of(work, struct macb_queue, tx_clear_data_task);
+	unsigned int tail;
+	unsigned int head;
+	u32 status;
+	unsigned long flags;
+
+	struct macb *bp = queue->bp;
+	u16 queue_index = queue - bp->queues;
+//			 			printk(KERN_ERR "XLNX: Clear data work struct\n");
+	struct timespec startTs, endTs;
+	BDEBUG(getnstimeofday(&startTs));
+
+	spin_lock_irqsave(&bp->lock, flags);
+
+
+	rmb();
+
+	head = queue->tx_head;
+	for (tail = queue->tx_tail; tail != head; tail++) {
+		struct macb_tx_skb	*tx_skb;
+		struct sk_buff		*skb;
+		struct macb_dma_desc	*desc;
+		u32			ctrl;
+
+		desc = macb_tx_desc(queue, tail);
+
+		/* Make hw descriptor updates visible to CPU */
+
+		ctrl = desc->ctrl;
+
+		/* TX_USED bit is only set by hardware on the very first buffer
+		* descriptor of the transmitted frame.
+		*/
+		if (!(ctrl & MACB_BIT(TX_USED)))
+			break;
+
+		/* Process all buffers of the current transmitted frame */
+		for (;; tail++) {
+			tx_skb = macb_tx_skb(queue, tail);
+			skb = tx_skb->skb;
+
+			/* First, update TX stats if needed */
+			//			if (skb) {
+			//				netdev_vdbg(bp->dev, "skb %u (data %p) TX complete\n",
+			//					    macb_tx_ring_wrap(tail), skb->data);
+			//				bp->stats.tx_packets++;
+			//				bp->stats.tx_bytes += skb->len;
+#ifdef CONFIG_MACB_EXT_BD
+			//				if (skb_shinfo(skb)->tx_flags & SKBTX_HW_TSTAMP)
+			//					macb_handle_txtstamp(bp, skb, desc);
+#endif
+			//			}
+
+			/* Now we can safely release resources */
+			//			macb_tx_unmap(bp, tx_skb);
+
+			/* skb is set only for the last buffer of the frame.
+			* WARNING: at this point skb has been freed by
+			* macb_tx_unmap().
+			*/
+			if (skb)
+				break;
+		}
+	}
+
+	queue->tx_tail = tail;
+	if (__netif_subqueue_stopped(bp->dev, queue_index) &&
+		CIRC_CNT(queue->tx_head, queue->tx_tail,
+			TX_RING_SIZE) <= MACB_TX_WAKEUP_THRESH) {
+		//
+		//				 			printk(KERN_ERR "XLNX: Forced into woken state\n");
+//		queue_writel(queue, IDR, MACB_BIT(TCOMP));
+
+
+		netif_wake_subqueue(bp->dev, queue_index);
+	}
+	else {
+		schedule_delayed_work(&queue->tx_clear_data_task, 1);
+	}
+
+
+
+
+	spin_unlock_irqrestore(&bp->lock, flags);
+	BDEBUG(getnstimeofday(&endTs));
+	BDEBUG(bp->txirq_short_time += as_nanoseconds(&endTs) - as_nanoseconds(&startTs));
+
+}
+
+
 
 
 static void macb_tx_interrupt(struct macb_queue *queue)
@@ -1631,27 +1723,28 @@ static int macb_start_xmit(struct sk_buff *skb, struct net_device *dev)
 
 			if (CIRC_SPACE(queue->tx_head, queue->tx_tail, TX_RING_SIZE) < count) {
 		//			printk(KERN_ERR "XLNX: Forced into busy state at start\n");
+				schedule_delayed_work(&queue->tx_clear_data_task, 1);
 
-			queue->please_clear=1;
-			queue_writel(queue, IER, MACB_BIT(TCOMP) | MACB_TX_INT_FLAGS);
-			if (bp->caps & MACB_CAPS_ISR_CLEAR_ON_WRITE)	
-				queue_writel(queue, ISR, MACB_BIT(TCOMP));
-			u32 xxp = macb_readl(bp, NCR);
-			if ((xxp & MACB_BIT(TSTART)) != MACB_BIT(TSTART)) macb_writel(bp, NCR, xxp | MACB_BIT(TSTART));
-			macb_tx_non_interrupt(queue);
-			if (CIRC_SPACE(queue->tx_head, queue->tx_tail, TX_RING_SIZE) < count) {
+//			queue->please_clear=1;
+//			queue_writel(queue, IER, MACB_BIT(TCOMP) | MACB_TX_INT_FLAGS);
+//			if (bp->caps & MACB_CAPS_ISR_CLEAR_ON_WRITE)	
+//				queue_writel(queue, ISR, MACB_BIT(TCOMP));
+//			u32 xxp = macb_readl(bp, NCR);
+//			if ((xxp & MACB_BIT(TSTART)) != MACB_BIT(TSTART)) macb_writel(bp, NCR, xxp | MACB_BIT(TSTART));
+//			macb_tx_non_interrupt(queue);
+//			if (CIRC_SPACE(queue->tx_head, queue->tx_tail, TX_RING_SIZE) < count) {
 
 				netif_stop_subqueue(dev, queue_index);
 				spin_unlock_irqrestore(&bp->lock, flags);
 				netdev_dbg(bp->dev, "tx_head = %u, tx_tail = %u\n",
 					queue->tx_head, queue->tx_tail);
 				return NETDEV_TX_BUSY;
-			}
-			else {
+//			}
+//			else {
 //				printk(KERN_ERR "XLNX: Recovered\n");
-				queue_writel(queue, IDR, MACB_BIT(TCOMP));
-				queue->please_clear = 0;
-			}
+//				queue_writel(queue, IDR, MACB_BIT(TCOMP));
+//				queue->please_clear = 0;
+//			}
 		}
 	}
 
@@ -3097,8 +3190,9 @@ static int macb_init(struct platform_device *pdev)
 				queue->irq, err);
 			return err;
 		}
-
 		INIT_WORK(&queue->tx_error_task, macb_tx_error_task);
+		INIT_DELAYED_WORK(&queue->tx_clear_data_task, macb_tx_clear_data_task);
+
 		q++;
 	}
 
